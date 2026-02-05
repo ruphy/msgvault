@@ -92,6 +92,13 @@ func setupTestSQLite(t *testing.T) (string, func()) {
 			size INTEGER,
 			content_hash TEXT
 		);
+
+		CREATE TABLE conversations (
+			id INTEGER PRIMARY KEY,
+			source_id INTEGER NOT NULL REFERENCES sources(id),
+			source_conversation_id TEXT,
+			title TEXT
+		);
 	`
 
 	if _, err := db.Exec(schema); err != nil {
@@ -162,6 +169,13 @@ func setupTestSQLite(t *testing.T) (string, func()) {
 			(2, 'document.pdf', 'application/pdf', 10000),
 			(2, 'image.png', 'image/png', 5000),
 			(4, 'report.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 20000);
+
+		-- Conversations
+		INSERT INTO conversations (id, source_id, source_conversation_id, title) VALUES
+			(101, 1, 'thread101', 'Hello World Thread'),
+			(102, 1, 'thread102', 'Follow up Thread'),
+			(103, 1, 'thread103', 'Question Thread'),
+			(104, 1, 'thread104', 'Final Thread');
 	`
 
 	if _, err := db.Exec(testData); err != nil {
@@ -804,6 +818,7 @@ func TestBuildCache_EmptyDatabase(t *testing.T) {
 		CREATE TABLE labels (id INTEGER PRIMARY KEY, name TEXT);
 		CREATE TABLE message_labels (message_id INTEGER, label_id INTEGER);
 		CREATE TABLE attachments (message_id INTEGER, size INTEGER, filename TEXT);
+		CREATE TABLE conversations (id INTEGER PRIMARY KEY, source_conversation_id TEXT);
 	`)
 	db.Close()
 
@@ -1001,9 +1016,15 @@ func BenchmarkBuildCache(b *testing.B) {
 		CREATE TABLE labels (id INTEGER PRIMARY KEY, name TEXT);
 		CREATE TABLE message_labels (message_id INTEGER, label_id INTEGER);
 		CREATE TABLE attachments (message_id INTEGER, size INTEGER, filename TEXT);
+		CREATE TABLE conversations (id INTEGER PRIMARY KEY, source_conversation_id TEXT);
 		INSERT INTO sources VALUES (1, 'test@gmail.com');
 		INSERT INTO labels VALUES (1, 'INBOX'), (2, 'Work');
 	`)
+
+	// Insert conversations to match messages
+	for i := 1; i <= 100; i++ {
+		_, _ = db.Exec("INSERT INTO conversations VALUES (?, ?)", i, "thread"+string(rune('0'+i%10)))
+	}
 
 	// Insert 1000 participants
 	for i := 1; i <= 1000; i++ {
@@ -1064,11 +1085,17 @@ func BenchmarkBuildCacheIncremental(b *testing.B) {
 		CREATE TABLE labels (id INTEGER PRIMARY KEY, name TEXT);
 		CREATE TABLE message_labels (message_id INTEGER, label_id INTEGER);
 		CREATE TABLE attachments (message_id INTEGER, size INTEGER, filename TEXT);
+		CREATE TABLE conversations (id INTEGER PRIMARY KEY, source_conversation_id TEXT);
 		INSERT INTO sources VALUES (1, 'test@gmail.com');
 		INSERT INTO labels VALUES (1, 'INBOX');
 		INSERT INTO participants VALUES (1, 'alice@example.com', 'example.com', 'Alice');
 		INSERT INTO participants VALUES (2, 'bob@example.com', 'example.com', 'Bob');
 	`)
+
+	// Insert conversations to match messages
+	for i := 1; i <= 100; i++ {
+		_, _ = db.Exec("INSERT INTO conversations VALUES (?, ?)", i, "thread"+string(rune('0'+i%10)))
+	}
 
 	baseTime := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	for i := 1; i <= 10000; i++ {

@@ -140,7 +140,7 @@ func buildCache(dbPath, analyticsDir string, fullRebuild bool) (*buildResult, er
 	// On full rebuild, clear existing cache
 	if fullRebuild {
 		fmt.Println("Full rebuild: clearing existing cache...")
-		for _, subdir := range []string{"messages", "participants", "message_recipients", "labels", "message_labels", "attachments", "sources"} {
+		for _, subdir := range []string{"messages", "participants", "message_recipients", "labels", "message_labels", "attachments", "sources", "conversations"} {
 			if err := os.RemoveAll(filepath.Join(analyticsDir, subdir)); err != nil {
 				return nil, fmt.Errorf("clear existing cache: %w", err)
 			}
@@ -148,7 +148,7 @@ func buildCache(dbPath, analyticsDir string, fullRebuild bool) (*buildResult, er
 	}
 
 	// Create subdirectories
-	for _, subdir := range []string{"messages", "participants", "message_recipients", "labels", "message_labels", "attachments", "sources"} {
+	for _, subdir := range []string{"messages", "participants", "message_recipients", "labels", "message_labels", "attachments", "sources", "conversations"} {
 		if err := os.MkdirAll(filepath.Join(analyticsDir, subdir), 0755); err != nil {
 			return nil, fmt.Errorf("create %s dir: %w", subdir, err)
 		}
@@ -340,6 +340,23 @@ func buildCache(dbPath, analyticsDir string, fullRebuild bool) (*buildResult, er
 	)
 	`, escapedSourcesDir)); err != nil {
 		return nil, fmt.Errorf("export sources: %w", err)
+	}
+
+	// 8. Export conversations (for Gmail thread IDs)
+	conversationsDir := filepath.Join(analyticsDir, "conversations")
+	escapedConversationsDir := strings.ReplaceAll(conversationsDir, "'", "''")
+	if err := runExport("conversations", fmt.Sprintf(`
+	COPY (
+		SELECT
+			id,
+			COALESCE(TRY_CAST(source_conversation_id AS VARCHAR), '') as source_conversation_id
+		FROM sqlite_db.conversations
+	) TO '%s/conversations.parquet' (
+		FORMAT PARQUET,
+		COMPRESSION 'zstd'
+	)
+	`, escapedConversationsDir)); err != nil {
+		return nil, fmt.Errorf("export conversations: %w", err)
 	}
 
 	fmt.Printf("  %-25s %s\n", "Total:", time.Since(buildStart).Round(time.Millisecond))

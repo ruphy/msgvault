@@ -220,6 +220,12 @@ func (e *DuckDBEngine) parquetCTEs() string {
 			SELECT * REPLACE (
 				CAST(id AS BIGINT) AS id
 			) FROM read_parquet('%s')
+		),
+		conv AS (
+			SELECT * REPLACE (
+				CAST(id AS BIGINT) AS id,
+				CAST(source_conversation_id AS VARCHAR) AS source_conversation_id
+			) FROM read_parquet('%s')
 		)
 	`, e.parquetGlob(),
 		e.parquetPath("message_recipients"),
@@ -227,7 +233,8 @@ func (e *DuckDBEngine) parquetCTEs() string {
 		e.parquetPath("labels"),
 		e.parquetPath("message_labels"),
 		e.parquetPath("attachments"),
-		e.parquetPath("sources"))
+		e.parquetPath("sources"),
+		e.parquetPath("conversations"))
 }
 
 // escapeILIKE escapes ILIKE wildcard characters (% and _) in user input.
@@ -1032,6 +1039,7 @@ func (e *DuckDBEngine) ListMessages(ctx context.Context, filter MessageFilter) (
 			msg.id,
 			COALESCE(msg.source_message_id, '') as source_message_id,
 			COALESCE(msg.conversation_id, 0) as conversation_id,
+			COALESCE(c.source_conversation_id, '') as source_conversation_id,
 			COALESCE(msg.subject, '') as subject,
 			COALESCE(msg.snippet, '') as snippet,
 			COALESCE(ms.from_email, '') as from_email,
@@ -1043,6 +1051,7 @@ func (e *DuckDBEngine) ListMessages(ctx context.Context, filter MessageFilter) (
 		FROM msg
 		JOIN filtered_msgs fm ON fm.id = msg.id
 		LEFT JOIN msg_sender ms ON ms.message_id = msg.id
+		LEFT JOIN conv c ON c.id = msg.conversation_id
 		ORDER BY %s
 	`, e.parquetCTEs(), where, orderBy, orderBy)
 
@@ -1063,6 +1072,7 @@ func (e *DuckDBEngine) ListMessages(ctx context.Context, filter MessageFilter) (
 			&msg.ID,
 			&msg.SourceMessageID,
 			&msg.ConversationID,
+			&msg.SourceConversationID,
 			&msg.Subject,
 			&msg.Snippet,
 			&msg.FromEmail,
@@ -1206,6 +1216,7 @@ func (e *DuckDBEngine) getMessageByQuery(ctx context.Context, whereClause string
 			m.id,
 			m.source_message_id,
 			m.conversation_id,
+			COALESCE(c.source_conversation_id, ''),
 			COALESCE(m.subject, ''),
 			COALESCE(m.snippet, ''),
 			m.sent_at,
@@ -1213,6 +1224,7 @@ func (e *DuckDBEngine) getMessageByQuery(ctx context.Context, whereClause string
 			COALESCE(m.size_estimate, 0),
 			m.has_attachments
 		FROM sqlite_db.messages m
+		LEFT JOIN sqlite_db.conversations c ON c.id = m.conversation_id
 		WHERE %s
 	`, whereClause)
 
@@ -1222,6 +1234,7 @@ func (e *DuckDBEngine) getMessageByQuery(ctx context.Context, whereClause string
 		&msg.ID,
 		&msg.SourceMessageID,
 		&msg.ConversationID,
+		&msg.SourceConversationID,
 		&msg.Subject,
 		&msg.Snippet,
 		&sentAt,
@@ -1519,6 +1532,7 @@ func (e *DuckDBEngine) Search(ctx context.Context, q *search.Query, limit, offse
 			m.id,
 			m.source_message_id,
 			m.conversation_id,
+			COALESCE(conv.source_conversation_id, ''),
 			COALESCE(m.subject, ''),
 			COALESCE(m.snippet, ''),
 			COALESCE(p_sender.email_address, ''),
@@ -1531,6 +1545,7 @@ func (e *DuckDBEngine) Search(ctx context.Context, q *search.Query, limit, offse
 		FROM sqlite_db.messages m
 		LEFT JOIN sqlite_db.message_recipients mr_sender ON mr_sender.message_id = m.id AND mr_sender.recipient_type = 'from'
 		LEFT JOIN sqlite_db.participants p_sender ON p_sender.id = mr_sender.participant_id
+		LEFT JOIN sqlite_db.conversations conv ON conv.id = m.conversation_id
 		%s
 		WHERE %s
 		ORDER BY m.sent_at DESC
@@ -1554,6 +1569,7 @@ func (e *DuckDBEngine) Search(ctx context.Context, q *search.Query, limit, offse
 			&msg.ID,
 			&msg.SourceMessageID,
 			&msg.ConversationID,
+			&msg.SourceConversationID,
 			&msg.Subject,
 			&msg.Snippet,
 			&msg.FromEmail,
@@ -1783,6 +1799,7 @@ func (e *DuckDBEngine) SearchFast(ctx context.Context, q *search.Query, filter M
 			COALESCE(msg.id, 0) as id,
 			COALESCE(msg.source_message_id, '') as source_message_id,
 			COALESCE(msg.conversation_id, 0) as conversation_id,
+			COALESCE(c.source_conversation_id, '') as source_conversation_id,
 			COALESCE(msg.subject, '') as subject,
 			COALESCE(msg.snippet, '') as snippet,
 			COALESCE(ms.from_email, '') as from_email,
@@ -1797,6 +1814,7 @@ func (e *DuckDBEngine) SearchFast(ctx context.Context, q *search.Query, filter M
 		LEFT JOIN msg_sender ms ON ms.message_id = msg.id
 		LEFT JOIN att ON att.message_id = msg.id
 		LEFT JOIN msg_labels mlbl ON mlbl.message_id = msg.id
+		LEFT JOIN conv c ON c.id = msg.conversation_id
 		WHERE %s
 		ORDER BY msg.sent_at DESC
 		LIMIT ? OFFSET ?
@@ -1820,6 +1838,7 @@ func (e *DuckDBEngine) SearchFast(ctx context.Context, q *search.Query, filter M
 			&msg.ID,
 			&msg.SourceMessageID,
 			&msg.ConversationID,
+			&msg.SourceConversationID,
 			&msg.Subject,
 			&msg.Snippet,
 			&msg.FromEmail,
@@ -1932,6 +1951,7 @@ func (e *DuckDBEngine) searchPageFromCache(ctx context.Context, limit, offset in
 			sm.id,
 			sm.source_message_id,
 			sm.conversation_id,
+			COALESCE(c.source_conversation_id, '') as source_conversation_id,
 			sm.subject,
 			sm.snippet,
 			sm.from_email,
@@ -1946,6 +1966,7 @@ func (e *DuckDBEngine) searchPageFromCache(ctx context.Context, limit, offset in
 		JOIN page p ON p.id = sm.id
 		LEFT JOIN att ON att.message_id = sm.id
 		LEFT JOIN msg_labels mlbl ON mlbl.message_id = sm.id
+		LEFT JOIN conv c ON c.id = sm.conversation_id
 		ORDER BY sm.sent_at DESC
 	`, e.parquetCTEs(), e.searchCacheTable, e.searchCacheTable)
 
@@ -1976,6 +1997,7 @@ func (e *DuckDBEngine) searchPageFromCache(ctx context.Context, limit, offset in
 			&msg.ID,
 			&msg.SourceMessageID,
 			&msg.ConversationID,
+			&msg.SourceConversationID,
 			&msg.Subject,
 			&msg.Snippet,
 			&msg.FromEmail,
