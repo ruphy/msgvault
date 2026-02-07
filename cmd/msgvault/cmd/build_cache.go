@@ -554,6 +554,7 @@ func setupSQLiteSource(duckDB *sql.DB, dbPath string) (cleanup func(), err error
 		{"participants", "SELECT id, email_address, domain, display_name FROM participants", ""},
 		{"labels", "SELECT id, name FROM labels", ""},
 		{"sources", "SELECT id, identifier FROM sources", ""},
+		{"conversations", "SELECT id, source_conversation_id FROM conversations", ""},
 	}
 
 	for _, t := range tables {

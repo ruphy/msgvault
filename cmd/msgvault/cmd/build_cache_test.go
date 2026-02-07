@@ -865,6 +865,7 @@ func TestCSVFallbackPath(t *testing.T) {
 		{"participants", "SELECT id, email_address, domain, display_name FROM participants", ""},
 		{"labels", "SELECT id, name FROM labels", ""},
 		{"sources", "SELECT id, identifier FROM sources", ""},
+		{"conversations", "SELECT id, source_conversation_id FROM conversations", ""},
 	}
 
 	for _, tbl := range tables {
@@ -933,6 +934,7 @@ func TestCSVFallbackPath(t *testing.T) {
 		"participants":       4,
 		"labels":             3,
 		"sources":            1,
+		"conversations":      4,
 	}
 	for tbl, expected := range counts {
 		var count int64
