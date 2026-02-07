@@ -125,7 +125,11 @@ func buildCache(dbPath, analyticsDir string, fullRebuild bool) (*buildResult, er
 		if !missingRequiredParquet(analyticsDir) {
 			return &buildResult{Skipped: true}, nil
 		}
-		fmt.Println("Backfilling missing cache tables...")
+		// Force full re-export: incremental filters (> lastMessageID) would
+		// export zero rows for tables that are completely missing. Reset
+		// lastMessageID so all data is re-exported.
+		fmt.Println("Backfilling missing cache tables (full re-export)...")
+		lastMessageID = 0
 	}
 
 	// Open DuckDB for the actual export

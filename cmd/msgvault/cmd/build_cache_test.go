@@ -551,6 +551,55 @@ func TestBuildCache_BackfillsMissingConversations(t *testing.T) {
 	}
 }
 
+// TestBuildCache_BackfillsMissingJunctionTable tests that missing incrementally-
+// filtered tables (message_recipients, message_labels, attachments) are fully
+// re-exported during backfill, not filtered to zero rows by stale ID filters.
+func TestBuildCache_BackfillsMissingJunctionTable(t *testing.T) {
+	tmpDir, cleanup := setupTestSQLite(t)
+	defer cleanup()
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	analyticsDir := filepath.Join(tmpDir, "analytics")
+
+	// First export — creates all tables.
+	if _, err := buildCache(dbPath, analyticsDir, false); err != nil {
+		t.Fatalf("first buildCache: %v", err)
+	}
+
+	// Remove message_recipients (a junction table with incremental filter).
+	recipientsDir := filepath.Join(analyticsDir, "message_recipients")
+	if err := os.RemoveAll(recipientsDir); err != nil {
+		t.Fatalf("remove message_recipients dir: %v", err)
+	}
+
+	// Second export — no new messages, but message_recipients is missing.
+	// The backfill must do a full re-export (lastMessageID reset to 0)
+	// so that all historical recipients are included.
+	result, err := buildCache(dbPath, analyticsDir, false)
+	if err != nil {
+		t.Fatalf("second buildCache: %v", err)
+	}
+	if result.Skipped {
+		t.Fatal("expected backfill, but was skipped")
+	}
+
+	// Verify all 12 original recipients are present (not zero from stale filter).
+	duckdb, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	defer duckdb.Close()
+
+	var count int64
+	q := "SELECT COUNT(*) FROM read_parquet('" + filepath.Join(recipientsDir, "*.parquet") + "')"
+	if err := duckdb.QueryRow(q).Scan(&count); err != nil {
+		t.Fatalf("count message_recipients: %v", err)
+	}
+	if count != 12 {
+		t.Errorf("expected 12 message_recipients after backfill, got %d", count)
+	}
+}
+
 // TestBuildCache_FullRebuild tests that --full-rebuild clears and recreates cache.
 func TestBuildCache_FullRebuild(t *testing.T) {
 	tmpDir, cleanup := setupTestSQLite(t)
