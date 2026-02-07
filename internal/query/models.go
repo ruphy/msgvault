@@ -25,15 +25,15 @@ type MessageSummary struct {
 	ConversationID       int64
 	SourceConversationID string // Gmail Thread ID
 	Subject              string
-	Snippet         string
-	FromEmail       string
-	FromName        string
-	SentAt          time.Time
-	SizeEstimate    int64
-	HasAttachments  bool
-	AttachmentCount int
-	Labels          []string
-	DeletedAt       *time.Time // When message was deleted from server (nil if not deleted)
+	Snippet              string
+	FromEmail            string
+	FromName             string
+	SentAt               time.Time
+	SizeEstimate         int64
+	HasAttachments       bool
+	AttachmentCount      int
+	Labels               []string
+	DeletedAt            *time.Time // When message was deleted from server (nil if not deleted)
 }
 
 // MessageDetail represents a full message with body and attachments.
@@ -43,11 +43,11 @@ type MessageDetail struct {
 	ConversationID       int64
 	SourceConversationID string // Gmail Thread ID
 	Subject              string
-	Snippet         string
-	SentAt          time.Time
-	ReceivedAt      *time.Time
-	SizeEstimate    int64
-	HasAttachments  bool
+	Snippet              string
+	SentAt               time.Time
+	ReceivedAt           *time.Time
+	SizeEstimate         int64
+	HasAttachments       bool
 
 	// Participants
 	From []Address

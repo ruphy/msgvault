@@ -180,6 +180,11 @@ func cacheNeedsBuild(dbPath, analyticsDir string) (bool, string) {
 		return true, "cache directory empty"
 	}
 
+	// Check for required parquet tables (e.g. conversations added in a newer version)
+	if missingRequiredParquet(analyticsDir) {
+		return true, "cache missing required tables"
+	}
+
 	return false, ""
 }
 

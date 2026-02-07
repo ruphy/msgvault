@@ -220,6 +220,7 @@ func TestBuildCache_BasicExport(t *testing.T) {
 		"labels",
 		"message_labels",
 		"attachments",
+		"conversations",
 	}
 
 	for _, dir := range expectedDirs {
@@ -472,6 +473,81 @@ func TestBuildCache_SkipsWhenNoNewMessages(t *testing.T) {
 
 	if !result.Skipped {
 		t.Error("expected export to be skipped when no new messages")
+	}
+}
+
+// TestBuildCache_BackfillsMissingConversations tests that an older cache missing
+// the conversations parquet table triggers a rebuild even when no new messages
+// exist. This simulates the upgrade path from a cache that predates the
+// conversations export.
+func TestBuildCache_BackfillsMissingConversations(t *testing.T) {
+	tmpDir, cleanup := setupTestSQLite(t)
+	defer cleanup()
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	analyticsDir := filepath.Join(tmpDir, "analytics")
+
+	// First export — creates all tables including conversations.
+	result1, err := buildCache(dbPath, analyticsDir, false)
+	if err != nil {
+		t.Fatalf("first buildCache: %v", err)
+	}
+	if result1.Skipped {
+		t.Fatal("expected first export to run")
+	}
+
+	// Simulate a legacy cache by removing the conversations directory.
+	conversationsDir := filepath.Join(analyticsDir, "conversations")
+	if err := os.RemoveAll(conversationsDir); err != nil {
+		t.Fatalf("remove conversations dir: %v", err)
+	}
+
+	// Verify the conversations dir is actually gone.
+	if _, err := os.Stat(conversationsDir); !os.IsNotExist(err) {
+		t.Fatal("expected conversations dir to be removed")
+	}
+
+	// Second export — no new messages, but conversations parquet is missing.
+	// buildCache must NOT skip; it should backfill the missing table.
+	result2, err := buildCache(dbPath, analyticsDir, false)
+	if err != nil {
+		t.Fatalf("second buildCache: %v", err)
+	}
+
+	if result2.Skipped {
+		t.Fatal("expected backfill rebuild when conversations parquet is missing, but was skipped")
+	}
+
+	// Verify conversations parquet was recreated.
+	pattern := filepath.Join(conversationsDir, "*.parquet")
+	matches, _ := filepath.Glob(pattern)
+	if len(matches) == 0 {
+		t.Error("expected conversations parquet files to be recreated after backfill")
+	}
+
+	// Verify conversation data is correct.
+	duckdb, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	defer duckdb.Close()
+
+	var count int64
+	q := "SELECT COUNT(*) FROM read_parquet('" + filepath.Join(conversationsDir, "*.parquet") + "')"
+	if err := duckdb.QueryRow(q).Scan(&count); err != nil {
+		t.Fatalf("count conversations: %v", err)
+	}
+	if count != 4 { // 4 conversations in test data
+		t.Errorf("expected 4 conversations after backfill, got %d", count)
+	}
+
+	// Third export — everything is up-to-date, should skip.
+	result3, err := buildCache(dbPath, analyticsDir, false)
+	if err != nil {
+		t.Fatalf("third buildCache: %v", err)
+	}
+	if !result3.Skipped {
+		t.Error("expected third export to be skipped (all tables present, no new messages)")
 	}
 }
 

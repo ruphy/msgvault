@@ -119,7 +119,13 @@ func buildCache(dbPath, analyticsDir string, fullRebuild bool) (*buildResult, er
 	}
 
 	if maxID <= lastMessageID && !fullRebuild {
-		return &buildResult{Skipped: true}, nil
+		// Even when no new messages exist, don't skip if required parquet
+		// tables are missing (e.g. upgrading from an older cache that
+		// predates the conversations export).
+		if !missingRequiredParquet(analyticsDir) {
+			return &buildResult{Skipped: true}, nil
+		}
+		fmt.Println("Backfilling missing cache tables...")
 	}
 
 	// Open DuckDB for the actual export
@@ -383,6 +389,66 @@ func buildCache(dbPath, analyticsDir string, fullRebuild bool) (*buildResult, er
 		MaxMessageID:  maxID,
 		OutputDir:     analyticsDir,
 	}, nil
+}
+
+// requiredParquetDirs lists the analytics subdirectories that must contain
+// at least one .parquet file for the cache to be considered complete.
+// When a new table is added to the export (e.g. conversations), it must also
+// be added here so that upgrades from older caches trigger a backfill.
+var requiredParquetDirs = []string{
+	"messages",
+	"sources",
+	"participants",
+	"message_recipients",
+	"labels",
+	"message_labels",
+	"attachments",
+	"conversations",
+}
+
+// missingRequiredParquet returns true if some parquet data exists (legacy cache)
+// but is missing one or more required tables. This detects stale caches from
+// before a new table was added (e.g. upgrading from a cache that predates the
+// conversations export). Returns false when NO parquet data exists at all
+// (empty/new cache) — that case is handled by the normal "no messages" skip.
+func missingRequiredParquet(analyticsDir string) bool {
+	// First check if any parquet data exists at all. If not, this isn't
+	// a legacy upgrade scenario — it's a fresh/empty cache.
+	hasAny := false
+	for _, dir := range requiredParquetDirs {
+		pattern := filepath.Join(analyticsDir, dir, "*.parquet")
+		if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
+			hasAny = true
+			break
+		}
+		if dir == "messages" {
+			if matches, _ := filepath.Glob(filepath.Join(analyticsDir, dir, "*", "*.parquet")); len(matches) > 0 {
+				hasAny = true
+				break
+			}
+		}
+	}
+	if !hasAny {
+		return false
+	}
+
+	// Some data exists — check if any required table is missing.
+	for _, dir := range requiredParquetDirs {
+		pattern := filepath.Join(analyticsDir, dir, "*.parquet")
+		matches, _ := filepath.Glob(pattern)
+		if len(matches) > 0 {
+			continue
+		}
+		// For messages, also check hive-partitioned layout (messages/year=*/*.parquet)
+		if dir == "messages" {
+			deepMatches, _ := filepath.Glob(filepath.Join(analyticsDir, dir, "*", "*.parquet"))
+			if len(deepMatches) > 0 {
+				continue
+			}
+		}
+		return true
+	}
+	return false
 }
 
 var cacheStatsCmd = &cobra.Command{
