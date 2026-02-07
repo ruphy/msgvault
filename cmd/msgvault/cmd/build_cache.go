@@ -125,10 +125,12 @@ func buildCache(dbPath, analyticsDir string, fullRebuild bool) (*buildResult, er
 		if !missingRequiredParquet(analyticsDir) {
 			return &buildResult{Skipped: true}, nil
 		}
-		// Force full re-export: incremental filters (> lastMessageID) would
-		// export zero rows for tables that are completely missing. Reset
-		// lastMessageID so all data is re-exported.
-		fmt.Println("Backfilling missing cache tables (full re-export)...")
+		// Force full rebuild: a partial backfill with lastMessageID > 0
+		// would write a new data.parquet alongside stale incr_*.parquet
+		// files from prior incremental runs, causing duplicate rows.
+		// Setting fullRebuild clears all subdirectories first.
+		fmt.Println("Backfilling missing cache tables (full rebuild)...")
+		fullRebuild = true
 		lastMessageID = 0
 	}
 

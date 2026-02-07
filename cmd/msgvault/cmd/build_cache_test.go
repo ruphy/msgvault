@@ -551,52 +551,107 @@ func TestBuildCache_BackfillsMissingConversations(t *testing.T) {
 	}
 }
 
-// TestBuildCache_BackfillsMissingJunctionTable tests that missing incrementally-
-// filtered tables (message_recipients, message_labels, attachments) are fully
-// re-exported during backfill, not filtered to zero rows by stale ID filters.
-func TestBuildCache_BackfillsMissingJunctionTable(t *testing.T) {
+// TestBuildCache_BackfillAfterIncrementalNoDuplicates tests the scenario:
+// full export → add data → incremental export → remove a required table → backfill.
+// This verifies that stale incr_*.parquet shards from prior incremental runs
+// are cleaned up during backfill, preventing duplicate rows.
+func TestBuildCache_BackfillAfterIncrementalNoDuplicates(t *testing.T) {
 	tmpDir, cleanup := setupTestSQLite(t)
 	defer cleanup()
 
 	dbPath := filepath.Join(tmpDir, "test.db")
 	analyticsDir := filepath.Join(tmpDir, "analytics")
 
-	// First export — creates all tables.
-	if _, err := buildCache(dbPath, analyticsDir, false); err != nil {
+	// Step 1: Initial full export (5 messages, 12 recipients).
+	result1, err := buildCache(dbPath, analyticsDir, false)
+	if err != nil {
 		t.Fatalf("first buildCache: %v", err)
 	}
-
-	// Remove message_recipients (a junction table with incremental filter).
-	recipientsDir := filepath.Join(analyticsDir, "message_recipients")
-	if err := os.RemoveAll(recipientsDir); err != nil {
-		t.Fatalf("remove message_recipients dir: %v", err)
+	if result1.ExportedCount != 5 {
+		t.Fatalf("expected 5 messages in initial export, got %d", result1.ExportedCount)
 	}
 
-	// Second export — no new messages, but message_recipients is missing.
-	// The backfill must do a full re-export (lastMessageID reset to 0)
-	// so that all historical recipients are included.
-	result, err := buildCache(dbPath, analyticsDir, false)
+	// Step 2: Add new messages to SQLite, then incremental export.
+	// This creates incr_*.parquet files alongside data.parquet.
+	sqliteDB, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
-		t.Fatalf("second buildCache: %v", err)
+		t.Fatalf("open sqlite: %v", err)
 	}
-	if result.Skipped {
+	_, err = sqliteDB.Exec(`
+		INSERT INTO messages (id, source_id, source_message_id, conversation_id, subject, snippet, sent_at, size_estimate, has_attachments) VALUES
+			(6, 1, 'msg6', 101, 'Incremental 1', 'Preview 6', '2024-03-15 10:00:00', 1200, 0),
+			(7, 1, 'msg7', 102, 'Incremental 2', 'Preview 7', '2024-03-16 11:00:00', 1300, 0);
+		INSERT INTO message_recipients (message_id, participant_id, recipient_type, display_name) VALUES
+			(6, 1, 'from', 'Alice Smith'),
+			(6, 2, 'to', 'Bob Jones'),
+			(7, 2, 'from', 'Bob Jones'),
+			(7, 1, 'to', 'Alice Smith');
+		INSERT INTO message_labels (message_id, label_id) VALUES (6, 1), (7, 1);
+	`)
+	sqliteDB.Close()
+	if err != nil {
+		t.Fatalf("insert incremental data: %v", err)
+	}
+
+	result2, err := buildCache(dbPath, analyticsDir, false)
+	if err != nil {
+		t.Fatalf("second buildCache (incremental): %v", err)
+	}
+	if result2.ExportedCount != 7 {
+		t.Fatalf("expected 7 messages after incremental, got %d", result2.ExportedCount)
+	}
+
+	// Step 3: Remove conversations dir (simulate legacy cache missing a table).
+	conversationsDir := filepath.Join(analyticsDir, "conversations")
+	if err := os.RemoveAll(conversationsDir); err != nil {
+		t.Fatalf("remove conversations dir: %v", err)
+	}
+
+	// Step 4: Backfill — no new messages, but conversations is missing.
+	// This must do a full rebuild, clearing stale incremental shards.
+	result3, err := buildCache(dbPath, analyticsDir, false)
+	if err != nil {
+		t.Fatalf("third buildCache (backfill): %v", err)
+	}
+	if result3.Skipped {
 		t.Fatal("expected backfill, but was skipped")
 	}
 
-	// Verify all 12 original recipients are present (not zero from stale filter).
+	// Step 5: Verify exact counts — no duplicates from stale incr_*.parquet.
 	duckdb, err := sql.Open("duckdb", "")
 	if err != nil {
 		t.Fatalf("open duckdb: %v", err)
 	}
 	defer duckdb.Close()
 
-	var count int64
-	q := "SELECT COUNT(*) FROM read_parquet('" + filepath.Join(recipientsDir, "*.parquet") + "')"
-	if err := duckdb.QueryRow(q).Scan(&count); err != nil {
-		t.Fatalf("count message_recipients: %v", err)
+	countRows := func(pattern string) int64 {
+		var count int64
+		pattern = filepath.ToSlash(pattern)
+		if err := duckdb.QueryRow("SELECT COUNT(*) FROM read_parquet('" + pattern + "')").Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", pattern, err)
+		}
+		return count
 	}
-	if count != 12 {
-		t.Errorf("expected 12 message_recipients after backfill, got %d", count)
+
+	// Expected: 7 messages (5 original + 2 incremental), NOT 12 (5+2+5 from dup)
+	if c := countRows(filepath.Join(analyticsDir, "messages", "**", "*.parquet")); c != 7 {
+		t.Errorf("messages: expected 7, got %d (possible duplicate from stale incremental shards)", c)
+	}
+	// Expected: 16 recipients (12 original + 4 incremental), NOT 28
+	if c := countRows(filepath.Join(analyticsDir, "message_recipients", "*.parquet")); c != 16 {
+		t.Errorf("message_recipients: expected 16, got %d", c)
+	}
+	// Expected: 10 message_labels (8 original + 2 incremental), NOT 18
+	if c := countRows(filepath.Join(analyticsDir, "message_labels", "*.parquet")); c != 10 {
+		t.Errorf("message_labels: expected 10, got %d", c)
+	}
+	// Expected: 3 attachments (no new ones added), NOT 6
+	if c := countRows(filepath.Join(analyticsDir, "attachments", "*.parquet")); c != 3 {
+		t.Errorf("attachments: expected 3, got %d", c)
+	}
+	// Conversations should be restored.
+	if c := countRows(filepath.Join(analyticsDir, "conversations", "*.parquet")); c != 4 {
+		t.Errorf("conversations: expected 4, got %d", c)
 	}
 }
 
