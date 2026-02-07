@@ -118,20 +118,18 @@ func buildCache(dbPath, analyticsDir string, fullRebuild bool) (*buildResult, er
 		maxID = maxMessageID.Int64
 	}
 
-	if maxID <= lastMessageID && !fullRebuild {
-		// Even when no new messages exist, don't skip if required parquet
-		// tables are missing (e.g. upgrading from an older cache that
-		// predates the conversations export).
-		if !missingRequiredParquet(analyticsDir) {
-			return &buildResult{Skipped: true}, nil
-		}
-		// Force full rebuild: a partial backfill with lastMessageID > 0
-		// would write a new data.parquet alongside stale incr_*.parquet
-		// files from prior incremental runs, causing duplicate rows.
-		// Setting fullRebuild clears all subdirectories first.
+	// Check for missing required parquet tables independently of whether
+	// new messages exist. A legacy cache might be missing tables (e.g.
+	// conversations) regardless of message count. Force full rebuild to
+	// avoid stale incr_*.parquet shards and ensure all tables are populated.
+	if !fullRebuild && missingRequiredParquet(analyticsDir) {
 		fmt.Println("Backfilling missing cache tables (full rebuild)...")
 		fullRebuild = true
 		lastMessageID = 0
+	}
+
+	if maxID <= lastMessageID && !fullRebuild {
+		return &buildResult{Skipped: true}, nil
 	}
 
 	// Open DuckDB for the actual export

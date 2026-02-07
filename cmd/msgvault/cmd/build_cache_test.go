@@ -655,6 +655,82 @@ func TestBuildCache_BackfillAfterIncrementalNoDuplicates(t *testing.T) {
 	}
 }
 
+// TestBuildCache_BackfillWithNewMessages tests that when a required table is
+// missing AND new messages exist, the build does a full rebuild (not incremental).
+// Without this, the code would stay in incremental mode and only export new
+// message_recipients, leaving historical rows missing from the rebuilt table.
+func TestBuildCache_BackfillWithNewMessages(t *testing.T) {
+	tmpDir, cleanup := setupTestSQLite(t)
+	defer cleanup()
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	analyticsDir := filepath.Join(tmpDir, "analytics")
+
+	// Step 1: Full export (5 messages, 12 recipients).
+	if _, err := buildCache(dbPath, analyticsDir, false); err != nil {
+		t.Fatalf("first buildCache: %v", err)
+	}
+
+	// Step 2: Delete message_recipients dir (simulate missing table).
+	recipientsDir := filepath.Join(analyticsDir, "message_recipients")
+	if err := os.RemoveAll(recipientsDir); err != nil {
+		t.Fatalf("remove message_recipients dir: %v", err)
+	}
+
+	// Step 3: Add new messages to SQLite (so maxID > lastMessageID).
+	sqliteDB, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	_, err = sqliteDB.Exec(`
+		INSERT INTO messages (id, source_id, source_message_id, conversation_id, subject, snippet, sent_at, size_estimate, has_attachments) VALUES
+			(6, 1, 'msg6', 101, 'New msg', 'Preview 6', '2024-03-15 10:00:00', 1200, 0);
+		INSERT INTO message_recipients (message_id, participant_id, recipient_type, display_name) VALUES
+			(6, 1, 'from', 'Alice Smith'),
+			(6, 2, 'to', 'Bob Jones');
+	`)
+	sqliteDB.Close()
+	if err != nil {
+		t.Fatalf("insert new data: %v", err)
+	}
+
+	// Step 4: Build — missing table + new messages should force full rebuild.
+	result, err := buildCache(dbPath, analyticsDir, false)
+	if err != nil {
+		t.Fatalf("second buildCache: %v", err)
+	}
+	if result.Skipped {
+		t.Fatal("expected rebuild, but was skipped")
+	}
+
+	// Step 5: Verify ALL recipients present (12 original + 2 new = 14).
+	// If only incremental ran, we'd see just 2 (new message's recipients).
+	duckdb, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	defer duckdb.Close()
+
+	var count int64
+	q := "SELECT COUNT(*) FROM read_parquet('" + filepath.ToSlash(filepath.Join(recipientsDir, "*.parquet")) + "')"
+	if err := duckdb.QueryRow(q).Scan(&count); err != nil {
+		t.Fatalf("count message_recipients: %v", err)
+	}
+	if count != 14 {
+		t.Errorf("message_recipients: expected 14 (12 original + 2 new), got %d", count)
+	}
+
+	// Also verify messages count is correct (6 total, no duplicates).
+	var msgCount int64
+	msgQ := "SELECT COUNT(*) FROM read_parquet('" + filepath.ToSlash(filepath.Join(analyticsDir, "messages", "**", "*.parquet")) + "', hive_partitioning=true)"
+	if err := duckdb.QueryRow(msgQ).Scan(&msgCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if msgCount != 6 {
+		t.Errorf("messages: expected 6, got %d", msgCount)
+	}
+}
+
 // TestBuildCache_FullRebuild tests that --full-rebuild clears and recreates cache.
 func TestBuildCache_FullRebuild(t *testing.T) {
 	tmpDir, cleanup := setupTestSQLite(t)
